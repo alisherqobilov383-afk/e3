@@ -1,75 +1,114 @@
 import logging
 import threading
+import re
 from flask import Flask
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 # --- SOZLAMALAR ---
 TOKEN = "8680476167:AAE0eo9nPoF6w0VUeYj0ipV3eSPAVxpG6T4"
-ADMIN_ID = 8422041084  # Adminning ID raqami (butun son ko'rinishida)
+ADMIN_ID = 8422041084  # O'zingizning ID raqamingizni yozing
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # --- BOT FUNKSIYALARI ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[KeyboardButton("Murojaat yozish")]]
+    """Botni boshlash"""
+    context.user_data['chat_active'] = False
+    context.user_data['contact_asked'] = False # Kontakt so'ralganini reset qilish
+    keyboard = [[KeyboardButton("📝 Murojaat yozish")]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "Assalomu alaykum! Murojaat qoldirish uchun tugmani bosing.", 
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        "Assalomu alaykum! Murojaat qoldirish uchun tugmani bosing:",
+        reply_markup=reply_markup
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin reply qilganda foydalanuvchiga yuborish"""
+    if not update.message.reply_to_message:
+        return
+
+    target_id = None
+    reply_msg = update.message.reply_to_message
+
+    if reply_msg.text:
+        match = re.search(r"ID:\s*(\d+)", reply_msg.text)
+        if match:
+            target_id = int(match.group(1))
+
+    if not target_id and reply_msg.forward_from:
+        target_id = reply_msg.forward_from.id
+
+    if target_id:
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=f"👨‍💻 Admin javobi:\n\n{update.message.text}"
+            )
+            await update.message.reply_text("✅ Javob yuborildi.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Xato: {e}")
+
+async def user_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Foydalanuvchi xabarlarini adminga avtomatik yuborish"""
     user = update.effective_user
     text = update.message.text
 
-    if text == "Murojaat yozish":
-        await update.message.reply_text("Assalomu alaykum! Murojaatingizni yozing, rasm, audio yoki videoni isbot uchun jo'nating.")
-        context.user_data['waiting_for_complaint'] = True
-    
-    elif context.user_data.get('waiting_for_complaint'):
-        # Adminga xabarni forward qilish
+    # Tugma bosilganda chatni faollashtirish
+    if text == "📝 Murojaat yozish":
+        context.user_data['chat_active'] = True
+        context.user_data['contact_asked'] = False # Yangi murojaatda flagni reset qilamiz
+        contact_btn = [[KeyboardButton("📱 Kontaktni ulashish", request_contact=True)]]
+        markup = ReplyKeyboardMarkup(contact_btn, resize_keyboard=True)
+        await update.message.reply_text("Iltimos murojaatingizni batafsil yozing. (matn, rasm, video, audio):", reply_markup=markup)
+        return
+
+    # Foydalanuvchi shunchaki yozsa va chat faol bo'lsa
+    if context.user_data.get('chat_active'):
+        # Adminga forward qilish
         await context.bot.forward_message(chat_id=ADMIN_ID, from_chat_id=user.id, message_id=update.message.message_id)
-        # Adminga foydalanuvchi ma'lumotlarini yuborish
-        await context.bot.send_message(
-            chat_id=ADMIN_ID, 
-            text=f"Yuboruvchi: {user.full_name}\nUsername: @{user.username}\nID: {user.id}"
-        )
-        await update.message.reply_text("Murojaatingiz adminga yuborildi.")
-        context.user_data['waiting_for_complaint'] = False
-
-async def reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Admin /reply buyrug'i orqali javob berishi uchun
-    if update.effective_user.id == ADMIN_ID and update.message.reply_to_message:
-        # Forward qilingan xabardan user_id ni aniqlash
-        user_id = update.message.reply_to_message.forward_from.id
-        reply_text = update.message.text.replace("/reply", "").strip()
         
-        if reply_text:
-            await context.bot.send_message(chat_id=user_id, text=f"Admin javobi:\n{reply_text}")
-            await update.message.reply_text("Javob yuborildi.")
+        # Adminga reply uchun qulay xabar
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"📩 Yangi xabar!\n👤 {user.full_name}\n🆔 ID: {user.id}\n\n👆 Javob berish uchun 'Reply' qiling."
+        )
+        
+        # JAVOB MANTIQI:
+        if not context.user_data.get('contact_asked'):
+            # Birinchi murojaatda uzun matn
+            await update.message.reply_text("Murojaatingiz adminga yuborildi. Admin siz bilan bog'lanishi uchun, iltimos raqamingizni qoldiring:")
+            context.user_data['contact_asked'] = True
         else:
-            await update.message.reply_text("Javob matnini yozing (masalan: /reply Salom).")
+            # Keyingi murojaatlarda qisqa matn
+            await update.message.reply_text("Murojaatingiz adminga yuborildi.")
 
-# --- FLASK SERVER (Render uchun) ---
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kontakt kelganda"""
+    contact = update.message.contact
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"📞 KONTAKT: {contact.first_name}\nTel: +{contact.phone_number}\nID: {contact.user_id}"
+    )
+    await update.message.reply_text("Kontaktingiz qabul qilindi!")
+
+# --- SERVER ---
 app_server = Flask(__name__)
-
 @app_server.route('/')
-def home():
-    return "Bot ishlamoqda!"
+def home(): return "Bot Active"
 
 def run_web():
     app_server.run(host='0.0.0.0', port=10000)
 
-# --- ASOSIY QISM ---
+# --- MAIN ---
 if __name__ == '__main__':
-    # Veb-serverni fon rejimida ishga tushiramiz
     threading.Thread(target=run_web, daemon=True).start()
-    
-    # Botni ishga tushirish
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("reply", reply_to_user))
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.REPLY & filters.User(user_id=ADMIN_ID), admin_reply_handler))
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.User(user_id=ADMIN_ID), user_message_handler))
     
     app.run_polling()
